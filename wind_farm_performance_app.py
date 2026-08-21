@@ -526,7 +526,7 @@ def render_week_view():
             h = STATUS[v]["hex"]
             return f"background-color:{h}22;color:{h};font-weight:600;text-align:center"
 
-        styled = df.style.applymap(style_cell).format(lambda v: STATUS[v]["name"].split(" ")[0])
+        styled = df.style.map(style_cell).format(lambda v: STATUS[v]["name"].split(" ")[0])
         st.dataframe(styled, use_container_width=True)
         daily = [f"{d['short']}: {day_group_availability(group, d['key'], st.session_state.roster, st.session_state.week_data):.1f}%" for d in DAYS]
         st.caption(" · ".join(daily))
