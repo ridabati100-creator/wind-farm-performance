@@ -533,7 +533,7 @@ def render_week_view():
         st.markdown("---")
 
 
-def render_performance_view(roster=None, week_data=None):
+def render_performance_view(roster=None, week_data=None, key_prefix="performance"):
     roster = roster or st.session_state.roster
     week_data = week_data or st.session_state.week_data
     perf = compute_performance(roster, week_data)
@@ -544,12 +544,12 @@ def render_performance_view(roster=None, week_data=None):
     c3.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
     c4.metric("Total downtime", f"{perf['overall_downtime_h']:.0f} h")
 
-    st.plotly_chart(make_daily_availability_chart(perf), use_container_width=True)
+    st.plotly_chart(make_daily_availability_chart(perf), use_container_width=True, key=f"{key_prefix}_daily_availability")
 
     left, right = st.columns(2)
     with left:
         st.markdown("##### Downtime by status")
-        st.plotly_chart(make_status_hours_chart(perf), use_container_width=True)
+        st.plotly_chart(make_status_hours_chart(perf), use_container_width=True, key=f"{key_prefix}_status_hours")
     with right:
         st.markdown("##### Group downtime")
         for group, stats in perf["group_stats"].items():
@@ -580,7 +580,7 @@ def render_report_view():
     docx = build_report_docx(data, monday, sunday)
     st.download_button("⬇️ Download Word (.docx)", data=docx, file_name=f"performance-report-{iso_date(monday)}.docx",
                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    render_performance_view()
+    render_performance_view(key_prefix="report")
 
     st.markdown("##### Intervention log")
     plans = [r for r in data["daily_plan"] if r["G52"] or r["G80"]]
@@ -610,7 +610,7 @@ def render_history_view():
         labels.append(f"Week of {format_date(monday)} to {format_date(monday + timedelta(days=6))}")
     idx = st.selectbox("Select archived week", options=range(len(history)), format_func=lambda i: labels[i])
     entry = history[idx]
-    render_performance_view(entry["roster"], entry["week_data"])
+    render_performance_view(entry["roster"], entry["week_data"], key_prefix=f"history_{idx}")
 
 # ============================================================
 # Main
@@ -633,7 +633,7 @@ def main():
     tabs = st.tabs(["📅 Day view", "🗓️ Week view", "📊 Performance", "📄 Report", "📚 History"])
     with tabs[0]: render_day_view()
     with tabs[1]: render_week_view()
-    with tabs[2]: render_performance_view()
+    with tabs[2]: render_performance_view(key_prefix="performance_tab")
     with tabs[3]: render_report_view()
     with tabs[4]: render_history_view()
 
