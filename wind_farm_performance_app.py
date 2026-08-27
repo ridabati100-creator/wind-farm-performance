@@ -758,17 +758,89 @@ def render_report_view():
 
 def render_history_view():
     history = st.session_state.history
+
     if not history:
         st.caption("No archived weeks yet.")
         return
+
     labels = []
     for entry in history:
         monday = parse_iso_date(entry["week_key"])
-        labels.append(f"Week of {format_date(monday)} to {format_date(monday + timedelta(days=6))}")
-    idx = st.selectbox("Select archived week", options=range(len(history)), format_func=lambda i: labels[i])
-    entry = history[idx]
-    render_performance_view(entry["roster"], entry["week_data"], key_prefix=f"history_{idx}")
+        labels.append(
+            f"Week of {format_date(monday)} to "
+            f"{format_date(monday + timedelta(days=6))}"
+        )
 
+    idx = st.selectbox(
+        "Select archived week",
+        options=range(len(history)),
+        format_func=lambda i: labels[i]
+    )
+
+    entry = history[idx]
+
+    # --------------------------------------------------------
+    # Restore archived week
+    # --------------------------------------------------------
+
+    st.markdown("---")
+
+    if st.button(
+        "↩️ Restore this week for editing",
+        use_container_width=True,
+        key=f"restore_week_{idx}"
+    ):
+
+        # Save the current active week before restoring
+        current_week_key = st.session_state.settings.get(
+            "active_week_key"
+        )
+
+        if current_week_key:
+            archive_week(
+                current_week_key,
+                st.session_state.roster,
+                st.session_state.week_data,
+                st.session_state.gc_planning
+            )
+
+        # Restore selected archived week
+        st.session_state.roster = json.loads(
+            json.dumps(entry["roster"])
+        )
+
+        st.session_state.week_data = normalize_week_data(
+            json.loads(json.dumps(entry["week_data"]))
+        )
+
+        st.session_state.gc_planning = json.loads(
+            json.dumps(entry.get("gc_planning", DEFAULT_GC))
+        )
+
+        st.session_state.settings["active_week_key"] = entry["week_key"]
+
+        # Remove restored week from history
+        st.session_state.history = [
+            h for i, h in enumerate(st.session_state.history)
+            if i != idx
+        ]
+
+        save_all()
+
+        st.success(
+            f"{labels[idx]} restored successfully. "
+            "You can now edit it from Day view."
+        )
+
+        st.rerun()
+
+    st.markdown("---")
+
+    render_performance_view(
+        entry["roster"],
+        entry["week_data"],
+        key_prefix=f"history_{idx}"
+    )
 # ============================================================
 # Main
 # ============================================================
