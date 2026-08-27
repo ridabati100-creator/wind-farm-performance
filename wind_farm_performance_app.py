@@ -525,6 +525,10 @@ def archive_week(week_key, roster, week_data, gc_planning):
 
 
 def check_week_rollover():
+    # Keep a restored archived week active while it is being edited.
+    if st.session_state.settings.get("manual_week_edit", False):
+        return
+
     real_key = iso_date(week_range()[0])
     active_key = st.session_state.settings.get("active_week_key")
     if active_key and active_key != real_key:
@@ -533,12 +537,12 @@ def check_week_rollover():
         st.session_state.settings["active_week_key"] = real_key
         save_all()
 
-
 def close_week():
     week_key = st.session_state.settings.get("active_week_key") or iso_date(week_range()[0])
     archive_week(week_key, st.session_state.roster, st.session_state.week_data, st.session_state.gc_planning)
     st.session_state.week_data = empty_week_for_roster(st.session_state.roster)
     st.session_state.settings["active_week_key"] = iso_date(week_range()[0])
+    st.session_state.settings["manual_week_edit"] = False
     save_all()
 
 # ============================================================
@@ -818,6 +822,7 @@ def render_history_view():
         )
 
         st.session_state.settings["active_week_key"] = entry["week_key"]
+        st.session_state.settings["manual_week_edit"] = True
 
         # Remove restored week from history
         st.session_state.history = [
