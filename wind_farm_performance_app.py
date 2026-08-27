@@ -24,16 +24,15 @@ DAYS = [
 ]
 DAY_KEYS = [d["key"] for d in DAYS]
 
-STATUS_ORDER = ["running", "waiting", "technical", "major"]
+STATUS_ORDER = ["running", "technical", "major"]
 STATUS = {
     "running":   {"name": "🟢 Running",               "hex": "#10b981"},
-    "waiting":   {"name": "🟡 Waiting",               "hex": "#f59e0b"},
     "technical": {"name": "🟣 Technical intervention","hex": "#8b5cf6"},
     "major":     {"name": "🔴 Major component (GC)",  "hex": "#ef4444"},
 }
 STATUS_NAMES = [STATUS[k]["name"] for k in STATUS_ORDER]
 NAME_TO_KEY = {v["name"]: k for k, v in STATUS.items()}
-SEVERITY = {"running": 0, "waiting": 1, "technical": 2, "major": 3}
+SEVERITY = {"running": 0, "technical": 1, "major": 2}
 
 INTERVALS = [
     {"h": 0, "label": "00:00–04:00"},
@@ -54,18 +53,18 @@ DEFAULT_ROSTER = {
 SEED_DAY_MACHINES = {
     "G52": {
         **{f"{i:02d}": {"intervals": DEFAULT_INTERVALS[:], "notes": ""} for i in range(1, 13)},
-        "07": {"intervals": ["waiting"] * 6, "notes": "Cable delivery pending (end of August)"},
-        "11": {"intervals": ["technical"] * 6, "notes": "Wind vane issue"},
+        "07": {"intervals": ["technical"] * 24, "notes": "Cable delivery pending (end of August)"},
+        "11": {"intervals": ["technical"] * 24, "notes": "Wind vane issue"},
     },
     "G80": {
         **{f"{i:02d}": {"intervals": DEFAULT_INTERVALS[:], "notes": ""} for i in range(1, 12)},
-        "01": {"intervals": ["major"] * 6, "notes": "GC (Blade bearing)"},
-        "02": {"intervals": ["major"] * 6, "notes": "GC (Blade bearing)"},
-        "03": {"intervals": ["technical"] * 6, "notes": "Gear motors"},
-        "04": {"intervals": ["technical"] * 6, "notes": "Under inspection"},
-        "08": {"intervals": ["technical"] * 6, "notes": "Yaw system"},
-        "09": {"intervals": ["major"] * 6, "notes": "GC (Generator)"},
-        "10": {"intervals": ["technical"] * 6, "notes": "Hub power supply"},
+        "01": {"intervals": ["major"] * 24, "notes": "GC (Blade bearing)"},
+        "02": {"intervals": ["major"] * 24, "notes": "GC (Blade bearing)"},
+        "03": {"intervals": ["technical"] * 24, "notes": "Gear motors"},
+        "04": {"intervals": ["technical"] * 24, "notes": "Under inspection"},
+        "08": {"intervals": ["technical"] * 24, "notes": "Yaw system"},
+        "09": {"intervals": ["major"] * 24, "notes": "GC (Generator)"},
+        "10": {"intervals": ["technical"] * 24, "notes": "Hub power supply"},
     },
 }
 SEED_PLAN = {"G52": "11", "G80": "04, 08"}
@@ -133,7 +132,7 @@ def empty_machines(roster):
 
 
 def empty_day(roster):
-    return {"machines": empty_machines(roster), "plan": {"G52": "", "G80": ""}}
+    return {"machines": empty_machines(roster), "plan": {"G52": "", "G80": ""}, "production_mwh": 0.0}
 
 
 def today_key():
@@ -158,10 +157,19 @@ def empty_week_for_roster(roster):
 def normalize_machine(m):
     if not m:
         return {"intervals": DEFAULT_INTERVALS[:], "notes": ""}
-    intervals = m.get("intervals")
+    intervals = m.get("intervals", [])
     if isinstance(intervals, list) and len(intervals) == 6:
-        return {"intervals": intervals, "notes": m.get("notes", m.get("constat", ""))}
-    return {"intervals": DEFAULT_INTERVALS[:], "notes": m.get("notes", m.get("constat", ""))}
+        expanded = []
+        for s in intervals:
+            s = "technical" if s == "waiting" else s
+            s = s if s in STATUS_ORDER else "running"
+            expanded.extend([s] * 4)
+        intervals = expanded
+    elif isinstance(intervals, list) and len(intervals) == 24:
+        intervals = ["technical" if s == "waiting" else (s if s in STATUS_ORDER else "running") for s in intervals]
+    else:
+        intervals = DEFAULT_INTERVALS[:]
+    return {"intervals": intervals, "notes": m.get("notes", m.get("constat", ""))}
 
 
 def normalize_week_data(week_data):
@@ -173,7 +181,7 @@ def normalize_week_data(week_data):
         machines = {}
         for group, ids_map in day.get("machines", {}).items():
             machines[group] = {mid: normalize_machine(mv) for mid, mv in ids_map.items()}
-        result[d["key"]] = {"machines": machines, "plan": day.get("plan", {"G52": "", "G80": ""})}
+        result[d["key"]] = {"machines": machines, "plan": day.get("plan", {"G52": "", "G80": ""}), "production_mwh": float(day.get("production_mwh", 0.0) or 0.0)}
     return result
 
 
@@ -248,7 +256,6 @@ def compute_performance(roster, week_data):
                 "machine": mid,
                 "availability_pct": mstats["availability_pct"],
                 "downtime_h": mstats["downtime_h"],
-                "waiting_h": mstats["counts"]["waiting"] * SLOT_HOURS,
                 "technical_h": mstats["counts"]["technical"] * SLOT_HOURS,
                 "major_h": mstats["counts"]["major"] * SLOT_HOURS,
             })
@@ -282,7 +289,8 @@ def compute_report_data(roster, week_data, gc_planning):
         "G52": week_data.get(d["key"], {}).get("plan", {}).get("G52", ""),
         "G80": week_data.get(d["key"], {}).get("plan", {}).get("G80", ""),
     } for d in DAYS]
-    return {"performance": perf, "daily_plan": daily_plan, "gc_planning": gc_planning}
+    production = [{"label": d["label"], "value": float(week_data.get(d["key"], {}).get("production_mwh", 0.0) or 0.0)} for d in DAYS]
+    return {"performance": perf, "daily_plan": daily_plan, "gc_planning": gc_planning, "production": production}
 
 # ============================================================
 # Charts
@@ -300,28 +308,24 @@ def make_gauge(value, title_text):
     return fig
 
 
-def make_daily_availability_chart(perf):
-    fig = go.Figure()
-    for group, stats in perf["group_stats"].items():
-        fig.add_trace(go.Scatter(
-            x=[d["short"] for d in DAYS],
-            y=[stats["daily_availability"][d["key"]] for d in DAYS],
-            mode="lines+markers",
-            name=group,
-        ))
+def make_real_production_chart(week_data):
+    values = [float(week_data.get(d["key"], {}).get("production_mwh", 0.0) or 0.0) for d in DAYS]
+    fig = go.Figure(go.Bar(
+        x=[d["short"] for d in DAYS], y=values,
+        text=[f"{v:.1f}" for v in values], textposition="auto",
+        name="Real production"
+    ))
     fig.update_layout(
-        yaxis=dict(title="Availability (%)", range=[0, 105]),
-        xaxis_title="Day",
-        height=340,
-        margin=dict(l=40, r=20, t=20, b=40),
-        legend=dict(orientation="h", y=-0.2),
+        title="Real daily production — whole wind farm",
+        yaxis_title="Production (MWh/day)", xaxis_title="Day",
+        height=340, margin=dict(l=40, r=20, t=50, b=40)
     )
     return fig
 
 
 def make_status_hours_chart(perf):
-    labels = [STATUS[k]["name"].split(" ", 1)[1] for k in STATUS_ORDER[1:]]
-    hours = [perf["status_counts"][k] * SLOT_HOURS for k in STATUS_ORDER[1:]]
+    labels = [STATUS[k]["name"].split(" ", 1)[1] for k in ["technical", "major"]]
+    hours = [perf["status_counts"][k] * SLOT_HOURS for k in ["technical", "major"]]
     fig = go.Figure(go.Bar(x=labels, y=hours))
     fig.update_layout(yaxis_title="Hours", height=320, margin=dict(l=40, r=20, t=20, b=60))
     return fig
@@ -354,17 +358,27 @@ def build_report_docx(data, monday, sunday):
         t.cell(0, i).paragraphs[0].add_run(vals[i]).bold = True
         t.cell(1, i).text = labels[i]
 
+    doc.add_heading("Real production — whole wind farm", level=2)
+    pt = doc.add_table(rows=1, cols=2)
+    pt.style = "Light List Accent 1"
+    pt.rows[0].cells[0].text = "Day"
+    pt.rows[0].cells[1].text = "Production (MWh)"
+    for r in data.get("production", []):
+        row = pt.add_row().cells
+        row[0].text = r["label"]
+        row[1].text = f'{r["value"]:.1f}'
+
     doc.add_heading("Machine performance", level=2)
-    mt = doc.add_table(rows=1, cols=7)
+    mt = doc.add_table(rows=1, cols=6)
     mt.style = "Light List Accent 1"
-    headers = ["Group", "Machine", "Availability", "Downtime", "Waiting", "Technical", "Major GC"]
+    headers = ["Group", "Machine", "Availability", "Downtime", "Technical", "Major GC"]
     for i, h in enumerate(headers):
         mt.rows[0].cells[i].paragraphs[0].add_run(h).bold = True
     for group, stats in perf["group_stats"].items():
         for r in stats["machines"]:
             row = mt.add_row().cells
             vals = [group, r["machine"], f"{r['availability_pct']:.1f}%", f"{r['downtime_h']:.0f} h",
-                    f"{r['waiting_h']:.0f} h", f"{r['technical_h']:.0f} h", f"{r['major_h']:.0f} h"]
+                    f"{r['technical_h']:.0f} h", f"{r['major_h']:.0f} h"]
             for i, v in enumerate(vals):
                 row[i].text = str(v)
 
@@ -448,33 +462,27 @@ def close_week():
 def render_machine_table(group, day_key):
     roster_ids = st.session_state.roster[group]
     machines = st.session_state.week_data[day_key]["machines"].setdefault(group, {})
-    total_slots = len(roster_ids) * 6
-    running = sum(1 for mid in roster_ids for s in machines.get(mid, {}).get("intervals", DEFAULT_INTERVALS) if s == "running")
-    pct = running / total_slots * 100 if total_slots else 100
-    st.markdown(f"**{group} — {pct:.1f}% available**")
+    pct = day_group_availability(group, day_key, st.session_state.roster, st.session_state.week_data)
+    st.markdown(f"### {group} — {pct:.1f}% available")
+    st.caption("24 hourly controls per turbine — arranged 8 + 8 + 8.")
 
-    rows = []
     for mid in roster_ids:
-        m = machines.get(mid, {"intervals": DEFAULT_INTERVALS[:], "notes": ""})
-        row = {"Machine": mid}
-        for i, iv in enumerate(INTERVALS):
-            row[iv["label"]] = STATUS[m["intervals"][i]]["name"]
-        row["Notes"] = m.get("notes", "")
-        rows.append(row)
-    df = pd.DataFrame(rows)
-
-    config = {"Machine": st.column_config.TextColumn(disabled=True, width="small")}
-    for iv in INTERVALS:
-        config[iv["label"]] = st.column_config.SelectboxColumn(options=STATUS_NAMES, required=True, width="medium")
-    config["Notes"] = st.column_config.TextColumn(width="large")
-
-    edited = st.data_editor(df, column_config=config, hide_index=True, use_container_width=True,
-                            key=f"editor_{group}_{day_key}", disabled=["Machine"])
-    for i, mid in enumerate(roster_ids):
-        machines[mid] = {
-            "intervals": [NAME_TO_KEY[edited.iloc[i][iv["label"]]] for iv in INTERVALS],
-            "notes": str(edited.iloc[i]["Notes"] or ""),
-        }
+        m = machines.setdefault(mid, {"intervals": DEFAULT_INTERVALS[:], "notes": ""})
+        with st.expander(f"{group} — Turbine {mid}", expanded=False):
+            intervals = m.get("intervals", DEFAULT_INTERVALS[:])
+            for start in (0, 8, 16):
+                cols = st.columns(8)
+                for j, hour in enumerate(range(start, start + 8)):
+                    with cols[j]:
+                        current = intervals[hour] if hour < len(intervals) else "running"
+                        selected = st.selectbox(
+                            f"{hour:02d}:00", STATUS_NAMES,
+                            index=STATUS_NAMES.index(STATUS[current]["name"]),
+                            key=f"hour_{group}_{day_key}_{mid}_{hour}"
+                        )
+                        intervals[hour] = NAME_TO_KEY[selected]
+            m["intervals"] = intervals
+            m["notes"] = st.text_input("Notes", value=m.get("notes", ""), key=f"notes_{group}_{day_key}_{mid}")
 
 
 def render_gc_planning():
@@ -496,11 +504,18 @@ def render_day_view():
     tk = today_key()
     sel = st.radio("Day", [d["short"] for d in DAYS], index=DAY_KEYS.index(tk), horizontal=True, label_visibility="collapsed")
     day_key = DAY_KEYS[[d["short"] for d in DAYS].index(sel)]
-    st.caption("Each column represents 4 hours. Select the operating status of each turbine.")
 
-    c1, c2 = st.columns(2)
-    with c1: render_machine_table("G52", day_key)
-    with c2: render_machine_table("G80", day_key)
+    current_prod = float(st.session_state.week_data[day_key].get("production_mwh", 0.0) or 0.0)
+    st.session_state.week_data[day_key]["production_mwh"] = st.number_input(
+        "⚡ Real production of the whole wind farm (G52 + G80) — MWh/day",
+        min_value=0.0, value=current_prod, step=1.0, key=f"production_{day_key}"
+    )
+
+    g52_tab, g80_tab = st.tabs(["G52 turbines", "G80 turbines"])
+    with g52_tab:
+        render_machine_table("G52", day_key)
+    with g80_tab:
+        render_machine_table("G80", day_key)
 
     st.markdown("##### Today's intervention plan")
     plan = st.session_state.week_data[day_key]["plan"]
@@ -512,24 +527,19 @@ def render_day_view():
 
 
 def render_week_view():
+    st.markdown("### Weekly availability (%)")
     for group in ["G52", "G80"]:
         st.markdown(f"### {group}")
-        data = {}
-        for d in DAYS:
-            data[d["short"]] = [
-                day_worst_status(st.session_state.week_data[d["key"]]["machines"].get(group, {}).get(mid, {"intervals": DEFAULT_INTERVALS})["intervals"])
-                for mid in st.session_state.roster[group]
-            ]
-        df = pd.DataFrame(data, index=st.session_state.roster[group])
-
-        def style_cell(v):
-            h = STATUS[v]["hex"]
-            return f"background-color:{h}22;color:{h};font-weight:600;text-align:center"
-
-        styled = df.style.map(style_cell).format(lambda v: STATUS[v]["name"].split(" ")[0])
-        st.dataframe(styled, use_container_width=True)
-        daily = [f"{d['short']}: {day_group_availability(group, d['key'], st.session_state.roster, st.session_state.week_data):.1f}%" for d in DAYS]
-        st.caption(" · ".join(daily))
+        rows = []
+        for mid in st.session_state.roster[group]:
+            row = {"Machine": mid}
+            for d in DAYS:
+                m = st.session_state.week_data[d["key"]]["machines"].get(group, {}).get(mid, {"intervals": DEFAULT_INTERVALS})
+                intervals = m.get("intervals", DEFAULT_INTERVALS)
+                row[d["short"]] = sum(1 for s in intervals if s == "running") / 24 * 100
+            rows.append(row)
+        df = pd.DataFrame(rows).set_index("Machine")
+        st.dataframe(df.style.format("{:.1f}%"), use_container_width=True)
         st.markdown("---")
 
 
@@ -542,9 +552,9 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
     c1.metric("Overall availability", f"{perf['overall_availability_pct']:.1f}%")
     c2.metric("G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%")
     c3.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
-    c4.metric("Total downtime", f"{perf['overall_downtime_h']:.0f} h")
+    c4.metric("Weekly real production", f"{sum(float(week_data.get(d['key'], {}).get('production_mwh', 0.0) or 0.0) for d in DAYS):.1f} MWh")
 
-    st.plotly_chart(make_daily_availability_chart(perf), use_container_width=True, key=f"{key_prefix}_daily_availability")
+    st.plotly_chart(make_real_production_chart(week_data), use_container_width=True, key=f"{key_prefix}_real_production")
 
     left, right = st.columns(2)
     with left:
@@ -564,7 +574,6 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
                 "Machine": r["machine"],
                 "Availability (%)": round(r["availability_pct"], 1),
                 "Downtime (h)": round(r["downtime_h"], 1),
-                "Waiting (h)": round(r["waiting_h"], 1),
                 "Technical (h)": round(r["technical_h"], 1),
                 "Major GC (h)": round(r["major_h"], 1),
             })
@@ -581,6 +590,9 @@ def render_report_view():
     st.download_button("⬇️ Download Word (.docx)", data=docx, file_name=f"performance-report-{iso_date(monday)}.docx",
                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     render_performance_view(key_prefix="report")
+
+    st.markdown("##### Daily real production")
+    st.dataframe(pd.DataFrame([{"Day": r["label"], "Production (MWh)": r["value"]} for r in data.get("production", [])]), hide_index=True, use_container_width=True)
 
     st.markdown("##### Intervention log")
     plans = [r for r in data["daily_plan"] if r["G52"] or r["G80"]]
@@ -628,7 +640,7 @@ def main():
         if st.button("📦 New week", use_container_width=True, help="Archive current week and start a new one"):
             close_week()
             st.rerun()
-        st.caption("No forecast module: this app focuses on technical performance, availability and downtime.")
+        st.caption("No forecast module: this app focuses on technical performance, hourly availability and real production.")
 
     tabs = st.tabs(["📅 Day view", "🗓️ Week view", "📊 Performance", "📄 Report", "📚 History"])
     with tabs[0]: render_day_view()
