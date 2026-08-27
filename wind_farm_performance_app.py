@@ -388,36 +388,6 @@ def pdf_bytes(title, subtitle, summary_rows, detail_rows=None, detail_headers=No
     return buf.getvalue()
 
 
-def build_daily_pdf(day_key, roster, week_data):
-    d = next(x for x in DAYS if x["key"] == day_key)
-    perf52 = day_group_availability("G52", day_key, roster, week_data)
-    perf80 = day_group_availability("G80", day_key, roster, week_data)
-
-    # Overall daily availability weighted by turbine count.
-    total_turbines = len(roster.get("G52", [])) + len(roster.get("G80", []))
-    overall = (
-        (perf52 * len(roster.get("G52", [])) + perf80 * len(roster.get("G80", []))) / total_turbines
-        if total_turbines else 100.0
-    )
-    production = production_for_day(week_data, day_key)
-    plan = week_data.get(day_key, {}).get("plan", {})
-
-    summary = [
-        ["Indicator", "Value"],
-        ["Day", d["label"]],
-        ["Real production", f"{production:.1f} MWh"],
-        ["Overall availability", f"{overall:.1f}%"],
-        ["G52 availability", f"{perf52:.1f}%"],
-        ["G80 availability", f"{perf80:.1f}%"],
-        ["G52 intervention plan", plan.get("G52", "") or "-"],
-        ["G80 intervention plan", plan.get("G80", "") or "-"],
-    ]
-    return pdf_bytes(
-        "Daily Performance Report — Wind Farm G52 & G80",
-        f"Daily technical performance and real production — {d['label']}",
-        summary,
-    )
-
 
 def build_weekly_pdf(roster, week_data, gc_planning):
     monday, sunday = week_range()
@@ -635,9 +605,9 @@ def render_day_view():
     prod_month = monthly_production(selected_date.year, selected_date.month)
 
     pc1, pc2, pc3 = st.columns(3)
-    pc1.metric("Production du jour", f"{prod_day:.1f} MWh")
-    pc2.metric("Somme production semaine", f"{prod_week:.1f} MWh")
-    pc3.metric("Somme production mois", f"{prod_month:.1f} MWh")
+    pc1.metric("Daily production", f"{prod_day:.1f} MWh")
+    pc2.metric("Weekly production total", f"{prod_week:.1f} MWh")
+    pc3.metric("Monthly production total", f"{prod_month:.1f} MWh")
 
     g52_tab, g80_tab = st.tabs(["G52 turbines", "G80 turbines"])
     with g52_tab:
@@ -680,11 +650,11 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
     c1.metric("Overall availability", f"{perf['overall_availability_pct']:.1f}%")
     c2.metric("G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%")
     c3.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
-    c4.metric("Somme production semaine", f"{weekly_production(week_data):.1f} MWh")
+    c4.metric("Weekly production total", f"{weekly_production(week_data):.1f} MWh")
 
     active_monday = parse_iso_date(st.session_state.settings.get("active_week_key"))
     st.metric(
-        "Somme production mois",
+        "Monthly production total",
         f"{monthly_production(active_monday.year, active_monday.month):.1f} MWh"
     )
 
@@ -719,43 +689,19 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
 def render_report_view():
     monday, sunday = week_range()
     st.markdown("### PDF Reports")
-    st.caption("Download reports manually: daily, weekly or monthly.")
+    st.caption("Download weekly or monthly reports manually.")
 
     report_type = st.radio(
         "Report type",
-        ["Daily", "Weekly", "Monthly"],
+        ["Weekly", "Monthly"],
         horizontal=True,
         key="report_type",
     )
 
-    if report_type == "Daily":
-        selected_short = st.selectbox(
-            "Day",
-            [d["short"] for d in DAYS],
-            index=DAY_KEYS.index(today_key()),
-            key="daily_report_day",
-        )
-        day_key = DAY_KEYS[[d["short"] for d in DAYS].index(selected_short)]
-        d = next(x for x in DAYS if x["key"] == day_key)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Production du jour", f"{production_for_day(st.session_state.week_data, day_key):.1f} MWh")
-        c2.metric("G52 availability", f"{day_group_availability('G52', day_key, st.session_state.roster, st.session_state.week_data):.1f}%")
-        c3.metric("G80 availability", f"{day_group_availability('G80', day_key, st.session_state.roster, st.session_state.week_data):.1f}%")
-
-        pdf = build_daily_pdf(day_key, st.session_state.roster, st.session_state.week_data)
-        st.download_button(
-            "⬇️ Download Daily PDF",
-            data=pdf,
-            file_name=f"daily-performance-{d['key']}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-    elif report_type == "Weekly":
+    if report_type == "Weekly":
         perf = compute_performance(st.session_state.roster, st.session_state.week_data)
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Somme production semaine", f"{weekly_production(st.session_state.week_data):.1f} MWh")
+        c1.metric("Weekly production total", f"{weekly_production(st.session_state.week_data):.1f} MWh")
         c2.metric("Overall availability", f"{perf['overall_availability_pct']:.1f}%")
         c3.metric("G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%")
         c4.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
@@ -793,8 +739,8 @@ def render_report_view():
         total = monthly_production(year, month)
         records = month_records(year, month)
         c1, c2 = st.columns(2)
-        c1.metric("Somme production mois", f"{total:.1f} MWh")
-        c2.metric("Jours enregistrés", len(records))
+        c1.metric("Monthly production total", f"{total:.1f} MWh")
+        c2.metric("Days with stored production data", len(records))
 
         if records:
             mdf = pd.DataFrame(
@@ -812,7 +758,6 @@ def render_report_view():
             mime="application/pdf",
             use_container_width=True,
         )
-
 
 def render_history_view():
     history = st.session_state.history
