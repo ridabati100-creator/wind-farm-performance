@@ -35,15 +35,11 @@ NAME_TO_KEY = {v["name"]: k for k, v in STATUS.items()}
 SEVERITY = {"running": 0, "technical": 1, "major": 2}
 
 INTERVALS = [
-    {"h": 0, "label": "00:00–04:00"},
-    {"h": 4, "label": "04:00–08:00"},
-    {"h": 8, "label": "08:00–12:00"},
-    {"h": 12, "label": "12:00–16:00"},
-    {"h": 16, "label": "16:00–20:00"},
-    {"h": 20, "label": "20:00–24:00"},
+    {"h": h, "label": f"{h:02d}:00–{(h+1)%24:02d}:00"}
+    for h in range(24)
 ]
-SLOT_HOURS = 4
-DEFAULT_INTERVALS = ["running"] * 6
+SLOT_HOURS = 1
+DEFAULT_INTERVALS = ["running"] * 24
 
 DEFAULT_ROSTER = {
     "G52": [f"{i:02d}" for i in range(1, 13)],
@@ -219,7 +215,7 @@ def machine_week_stats(group, mid, week_data):
     counts = {k: 0 for k in STATUS_ORDER}
     for d in DAYS:
         m = week_data.get(d["key"], {}).get("machines", {}).get(group, {}).get(mid, {})
-        for s in m.get("intervals", DEFAULT_INTERVALS):
+        for s in normalize_machine(m)["intervals"]:
             counts[s] = counts.get(s, 0) + 1
     total_slots = sum(counts.values())
     running_slots = counts["running"]
@@ -234,7 +230,7 @@ def day_group_availability(group, day_key, roster, week_data):
     running = 0
     for mid in ids:
         m = week_data.get(day_key, {}).get("machines", {}).get(group, {}).get(mid, {})
-        running += sum(1 for s in m.get("intervals", DEFAULT_INTERVALS) if s == "running")
+        running += sum(1 for s in normalize_machine(m)["intervals"] if s == "running")
     return (running / total * 100) if total else 100.0
 
 
@@ -469,7 +465,7 @@ def render_machine_table(group, day_key):
     for mid in roster_ids:
         m = machines.setdefault(mid, {"intervals": DEFAULT_INTERVALS[:], "notes": ""})
         with st.expander(f"{group} — Turbine {mid}", expanded=False):
-            intervals = m.get("intervals", DEFAULT_INTERVALS[:])
+            intervals = normalize_machine(m)["intervals"]
             for start in (0, 8, 16):
                 cols = st.columns(8)
                 for j, hour in enumerate(range(start, start + 8)):
@@ -535,7 +531,7 @@ def render_week_view():
             row = {"Machine": mid}
             for d in DAYS:
                 m = st.session_state.week_data[d["key"]]["machines"].get(group, {}).get(mid, {"intervals": DEFAULT_INTERVALS})
-                intervals = m.get("intervals", DEFAULT_INTERVALS)
+                intervals = normalize_machine(m)["intervals"]
                 row[d["short"]] = sum(1 for s in intervals if s == "running") / 24 * 100
             rows.append(row)
         df = pd.DataFrame(rows).set_index("Machine")
@@ -634,7 +630,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🌬️ Wind Farm Performance")
-        st.caption("G52 & G80 — Technical availability study")
+        st.caption("G52 & G80 — Hourly technical availability & real production study")
         st.write(datetime.now().strftime("%A %d %B %Y — %H:%M"))
         st.markdown("---")
         if st.button("📦 New week", use_container_width=True, help="Archive current week and start a new one"):
