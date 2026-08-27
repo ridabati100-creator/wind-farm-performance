@@ -6,8 +6,11 @@ from datetime import datetime, date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
-from docx import Document
-from docx.shared import Pt, RGBColor
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 
 # ============================================================
 # Constants
@@ -278,6 +281,200 @@ def compute_performance(roster, week_data):
     }
 
 
+def production_for_day(week_data, day_key):
+    return float(week_data.get(day_key, {}).get("production_mwh", 0.0) or 0.0)
+
+
+def weekly_production(week_data):
+    return sum(production_for_day(week_data, d["key"]) for d in DAYS)
+
+
+def iter_all_production_records():
+    """Return dated production records from archived weeks + active week."""
+    records = []
+    seen = set()
+
+    # Archived weeks
+    for entry in st.session_state.get("history", []):
+        try:
+            monday = parse_iso_date(entry["week_key"])
+        except Exception:
+            continue
+        wd = normalize_week_data(entry.get("week_data", {}))
+        for idx, d in enumerate(DAYS):
+            dt = monday + timedelta(days=idx)
+            key = iso_date(dt)
+            if key not in seen:
+                records.append((dt, production_for_day(wd, d["key"])))
+                seen.add(key)
+
+    # Active week takes priority
+    try:
+        monday = parse_iso_date(st.session_state.settings.get("active_week_key"))
+    except Exception:
+        monday = week_range()[0]
+
+    for idx, d in enumerate(DAYS):
+        dt = monday + timedelta(days=idx)
+        key = iso_date(dt)
+        value = production_for_day(st.session_state.week_data, d["key"])
+        records = [(rd, rv) for rd, rv in records if iso_date(rd) != key]
+        records.append((dt, value))
+
+    return sorted(records, key=lambda x: x[0])
+
+
+def monthly_production(year, month):
+    return sum(
+        value for dt, value in iter_all_production_records()
+        if dt.year == year and dt.month == month
+    )
+
+
+def month_records(year, month):
+    return [
+        (dt, value) for dt, value in iter_all_production_records()
+        if dt.year == year and dt.month == month
+    ]
+
+
+def pdf_bytes(title, subtitle, summary_rows, detail_rows=None, detail_headers=None):
+    """Build a clean downloadable PDF in memory."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        rightMargin=14*mm, leftMargin=14*mm,
+        topMargin=14*mm, bottomMargin=14*mm,
+    )
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(title, styles["Title"]),
+        Paragraph(subtitle, styles["Normal"]),
+        Spacer(1, 6*mm),
+    ]
+
+    summary = Table(summary_rows, repeatRows=1, hAlign="LEFT")
+    summary.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0f766e")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.4, colors.grey),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f3f4f6")]),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story += [summary, Spacer(1, 7*mm)]
+
+    if detail_rows is not None and detail_headers is not None:
+        story.append(Paragraph("Details", styles["Heading2"]))
+        detail = Table([detail_headers] + detail_rows, repeatRows=1, hAlign="LEFT")
+        detail.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#134e4a")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("GRID", (0,0), (-1,-1), 0.35, colors.grey),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]))
+        story.append(detail)
+
+    story += [
+        Spacer(1, 7*mm),
+        Paragraph(f"Generated on {datetime.now().strftime('%d %B %Y, %H:%M')}", styles["Normal"]),
+    ]
+    doc.build(story)
+    return buf.getvalue()
+
+
+def build_daily_pdf(day_key, roster, week_data):
+    d = next(x for x in DAYS if x["key"] == day_key)
+    perf52 = day_group_availability("G52", day_key, roster, week_data)
+    perf80 = day_group_availability("G80", day_key, roster, week_data)
+
+    # Overall daily availability weighted by turbine count.
+    total_turbines = len(roster.get("G52", [])) + len(roster.get("G80", []))
+    overall = (
+        (perf52 * len(roster.get("G52", [])) + perf80 * len(roster.get("G80", []))) / total_turbines
+        if total_turbines else 100.0
+    )
+    production = production_for_day(week_data, day_key)
+    plan = week_data.get(day_key, {}).get("plan", {})
+
+    summary = [
+        ["Indicator", "Value"],
+        ["Day", d["label"]],
+        ["Real production", f"{production:.1f} MWh"],
+        ["Overall availability", f"{overall:.1f}%"],
+        ["G52 availability", f"{perf52:.1f}%"],
+        ["G80 availability", f"{perf80:.1f}%"],
+        ["G52 intervention plan", plan.get("G52", "") or "-"],
+        ["G80 intervention plan", plan.get("G80", "") or "-"],
+    ]
+    return pdf_bytes(
+        "Daily Performance Report — Wind Farm G52 & G80",
+        f"Daily technical performance and real production — {d['label']}",
+        summary,
+    )
+
+
+def build_weekly_pdf(roster, week_data, gc_planning):
+    monday, sunday = week_range()
+    perf = compute_performance(roster, week_data)
+    total_prod = weekly_production(week_data)
+
+    summary = [
+        ["Indicator", "Value"],
+        ["Period", f"{format_date(monday)} to {format_date(sunday)}"],
+        ["Weekly real production", f"{total_prod:.1f} MWh"],
+        ["Overall availability", f"{perf['overall_availability_pct']:.1f}%"],
+        ["G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%"],
+        ["G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%"],
+        ["Total downtime", f"{perf['overall_downtime_h']:.0f} h"],
+    ]
+
+    details = []
+    for d in DAYS:
+        details.append([
+            d["label"],
+            f"{production_for_day(week_data, d['key']):.1f}",
+            f"{day_group_availability('G52', d['key'], roster, week_data):.1f}%",
+            f"{day_group_availability('G80', d['key'], roster, week_data):.1f}%",
+            week_data.get(d["key"], {}).get("plan", {}).get("G52", "") or "-",
+            week_data.get(d["key"], {}).get("plan", {}).get("G80", "") or "-",
+        ])
+
+    return pdf_bytes(
+        "Weekly Performance Report — Wind Farm G52 & G80",
+        f"Week of {format_date(monday)} to {format_date(sunday)}",
+        summary,
+        details,
+        ["Day", "Production (MWh)", "G52 avail.", "G80 avail.", "G52 plan", "G80 plan"],
+    )
+
+
+def build_monthly_pdf(year, month):
+    records = month_records(year, month)
+    total_prod = sum(v for _, v in records)
+    month_name = EN_MONTHS[month - 1]
+
+    summary = [
+        ["Indicator", "Value"],
+        ["Month", f"{month_name} {year}"],
+        ["Monthly real production", f"{total_prod:.1f} MWh"],
+        ["Days with stored production data", str(len(records))],
+    ]
+    details = [[dt.strftime("%Y-%m-%d"), f"{value:.1f}"] for dt, value in records]
+
+    return pdf_bytes(
+        "Monthly Production Report — Wind Farm G52 & G80",
+        f"Real production summary — {month_name} {year}",
+        summary,
+        details,
+        ["Date", "Production (MWh)"],
+    )
+
 def compute_report_data(roster, week_data, gc_planning):
     perf = compute_performance(roster, week_data)
     daily_plan = [{
@@ -329,82 +526,6 @@ def make_status_hours_chart(perf):
 # ============================================================
 # Reports
 # ============================================================
-
-def build_report_docx(data, monday, sunday):
-    doc = Document()
-    doc.styles["Normal"].font.name = "Calibri"
-    doc.styles["Normal"].font.size = Pt(10.5)
-    teal = RGBColor(0x13, 0x4e, 0x4a)
-
-    title = doc.add_heading("Weekly Performance Report — Wind Farm G52 & G80", level=1)
-    title.runs[0].font.color.rgb = teal
-    doc.add_paragraph(f"Week of {format_date(monday)} to {format_date(sunday)}")
-
-    perf = data["performance"]
-    t = doc.add_table(rows=2, cols=4)
-    t.style = "Light Grid Accent 1"
-    vals = [
-        f"{perf['overall_availability_pct']:.1f}%",
-        f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%",
-        f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%",
-        f"{perf['overall_downtime_h']:.0f} h",
-    ]
-    labels = ["Overall availability", "G52 availability", "G80 availability", "Total downtime"]
-    for i in range(4):
-        t.cell(0, i).paragraphs[0].add_run(vals[i]).bold = True
-        t.cell(1, i).text = labels[i]
-
-    doc.add_heading("Real production — whole wind farm", level=2)
-    pt = doc.add_table(rows=1, cols=2)
-    pt.style = "Light List Accent 1"
-    pt.rows[0].cells[0].text = "Day"
-    pt.rows[0].cells[1].text = "Production (MWh)"
-    for r in data.get("production", []):
-        row = pt.add_row().cells
-        row[0].text = r["label"]
-        row[1].text = f'{r["value"]:.1f}'
-
-    doc.add_heading("Machine performance", level=2)
-    mt = doc.add_table(rows=1, cols=6)
-    mt.style = "Light List Accent 1"
-    headers = ["Group", "Machine", "Availability", "Downtime", "Technical", "Major GC"]
-    for i, h in enumerate(headers):
-        mt.rows[0].cells[i].paragraphs[0].add_run(h).bold = True
-    for group, stats in perf["group_stats"].items():
-        for r in stats["machines"]:
-            row = mt.add_row().cells
-            vals = [group, r["machine"], f"{r['availability_pct']:.1f}%", f"{r['downtime_h']:.0f} h",
-                    f"{r['technical_h']:.0f} h", f"{r['major_h']:.0f} h"]
-            for i, v in enumerate(vals):
-                row[i].text = str(v)
-
-    doc.add_heading("Intervention log", level=2)
-    plans = [r for r in data["daily_plan"] if r["G52"] or r["G80"]]
-    if not plans:
-        doc.add_paragraph("No interventions planned this week.")
-    for r in plans:
-        parts = []
-        if r["G52"]: parts.append(f"G52 ({r['G52']})")
-        if r["G80"]: parts.append(f"G80 ({r['G80']})")
-        doc.add_paragraph(f"{r['label']}: {' · '.join(parts)}", style="List Bullet")
-
-    doc.add_heading("GC Planning — major components", level=2)
-    if not data["gc_planning"]:
-        doc.add_paragraph("No major-component deadlines scheduled.")
-    else:
-        gt = doc.add_table(rows=1, cols=4)
-        gt.style = "Light List Accent 1"
-        for i, h in enumerate(["Group", "Machine", "Component", "Due date"]):
-            gt.rows[0].cells[i].paragraphs[0].add_run(h).bold = True
-        for r in data["gc_planning"]:
-            row = gt.add_row().cells
-            for i, v in enumerate([r["group"], r["machine"], r["component"], r["due"]]):
-                row[i].text = v
-
-    doc.add_paragraph(f"Generated on {datetime.now().strftime('%d %B %Y, %H:%M')}")
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
 
 # ============================================================
 # Session state and rollover
@@ -507,6 +628,17 @@ def render_day_view():
         min_value=0.0, value=current_prod, step=1.0, key=f"production_{day_key}"
     )
 
+    active_monday = parse_iso_date(st.session_state.settings.get("active_week_key"))
+    selected_date = active_monday + timedelta(days=DAY_KEYS.index(day_key))
+    prod_day = production_for_day(st.session_state.week_data, day_key)
+    prod_week = weekly_production(st.session_state.week_data)
+    prod_month = monthly_production(selected_date.year, selected_date.month)
+
+    pc1, pc2, pc3 = st.columns(3)
+    pc1.metric("Production du jour", f"{prod_day:.1f} MWh")
+    pc2.metric("Somme production semaine", f"{prod_week:.1f} MWh")
+    pc3.metric("Somme production mois", f"{prod_month:.1f} MWh")
+
     g52_tab, g80_tab = st.tabs(["G52 turbines", "G80 turbines"])
     with g52_tab:
         render_machine_table("G52", day_key)
@@ -548,7 +680,13 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
     c1.metric("Overall availability", f"{perf['overall_availability_pct']:.1f}%")
     c2.metric("G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%")
     c3.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
-    c4.metric("Weekly real production", f"{sum(float(week_data.get(d['key'], {}).get('production_mwh', 0.0) or 0.0) for d in DAYS):.1f} MWh")
+    c4.metric("Somme production semaine", f"{weekly_production(week_data):.1f} MWh")
+
+    active_monday = parse_iso_date(st.session_state.settings.get("active_week_key"))
+    st.metric(
+        "Somme production mois",
+        f"{monthly_production(active_monday.year, active_monday.month):.1f} MWh"
+    )
 
     st.plotly_chart(make_real_production_chart(week_data), use_container_width=True, key=f"{key_prefix}_real_production")
 
@@ -580,31 +718,100 @@ def render_performance_view(roster=None, week_data=None, key_prefix="performance
 
 def render_report_view():
     monday, sunday = week_range()
-    data = compute_report_data(st.session_state.roster, st.session_state.week_data, st.session_state.gc_planning)
-    st.markdown(f"### Weekly Performance Report — {format_date(monday)} to {format_date(sunday)}")
-    docx = build_report_docx(data, monday, sunday)
-    st.download_button("⬇️ Download Word (.docx)", data=docx, file_name=f"performance-report-{iso_date(monday)}.docx",
-                       mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    render_performance_view(key_prefix="report")
+    st.markdown("### PDF Reports")
+    st.caption("Download reports manually: daily, weekly or monthly.")
 
-    st.markdown("##### Daily real production")
-    st.dataframe(pd.DataFrame([{"Day": r["label"], "Production (MWh)": r["value"]} for r in data.get("production", [])]), hide_index=True, use_container_width=True)
+    report_type = st.radio(
+        "Report type",
+        ["Daily", "Weekly", "Monthly"],
+        horizontal=True,
+        key="report_type",
+    )
 
-    st.markdown("##### Intervention log")
-    plans = [r for r in data["daily_plan"] if r["G52"] or r["G80"]]
-    if not plans:
-        st.caption("No interventions planned this week.")
-    for r in plans:
-        parts = []
-        if r["G52"]: parts.append(f"G52 ({r['G52']})")
-        if r["G80"]: parts.append(f"G80 ({r['G80']})")
-        st.markdown(f"**{r['label']}:** {' · '.join(parts)}")
+    if report_type == "Daily":
+        selected_short = st.selectbox(
+            "Day",
+            [d["short"] for d in DAYS],
+            index=DAY_KEYS.index(today_key()),
+            key="daily_report_day",
+        )
+        day_key = DAY_KEYS[[d["short"] for d in DAYS].index(selected_short)]
+        d = next(x for x in DAYS if x["key"] == day_key)
 
-    st.markdown("##### GC Planning — major components")
-    if data["gc_planning"]:
-        st.dataframe(pd.DataFrame(data["gc_planning"])[["group", "machine", "component", "due"]], hide_index=True, use_container_width=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Production du jour", f"{production_for_day(st.session_state.week_data, day_key):.1f} MWh")
+        c2.metric("G52 availability", f"{day_group_availability('G52', day_key, st.session_state.roster, st.session_state.week_data):.1f}%")
+        c3.metric("G80 availability", f"{day_group_availability('G80', day_key, st.session_state.roster, st.session_state.week_data):.1f}%")
+
+        pdf = build_daily_pdf(day_key, st.session_state.roster, st.session_state.week_data)
+        st.download_button(
+            "⬇️ Download Daily PDF",
+            data=pdf,
+            file_name=f"daily-performance-{d['key']}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    elif report_type == "Weekly":
+        perf = compute_performance(st.session_state.roster, st.session_state.week_data)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Somme production semaine", f"{weekly_production(st.session_state.week_data):.1f} MWh")
+        c2.metric("Overall availability", f"{perf['overall_availability_pct']:.1f}%")
+        c3.metric("G52 availability", f"{perf['group_stats'].get('G52', {}).get('availability_pct', 100):.1f}%")
+        c4.metric("G80 availability", f"{perf['group_stats'].get('G80', {}).get('availability_pct', 100):.1f}%")
+
+        pdf = build_weekly_pdf(
+            st.session_state.roster,
+            st.session_state.week_data,
+            st.session_state.gc_planning,
+        )
+        st.download_button(
+            "⬇️ Download Weekly PDF",
+            data=pdf,
+            file_name=f"weekly-performance-{iso_date(monday)}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+        render_performance_view(key_prefix="report_weekly")
+
     else:
-        st.caption("No major-component deadlines scheduled.")
+        today = date.today()
+        years = sorted({dt.year for dt, _ in iter_all_production_records()} | {today.year}, reverse=True)
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            year = st.selectbox("Year", years, index=0, key="monthly_report_year")
+        with mc2:
+            month = st.selectbox(
+                "Month",
+                list(range(1, 13)),
+                index=today.month - 1,
+                format_func=lambda m: EN_MONTHS[m - 1],
+                key="monthly_report_month",
+            )
+
+        total = monthly_production(year, month)
+        records = month_records(year, month)
+        c1, c2 = st.columns(2)
+        c1.metric("Somme production mois", f"{total:.1f} MWh")
+        c2.metric("Jours enregistrés", len(records))
+
+        if records:
+            mdf = pd.DataFrame(
+                [{"Date": dt.strftime("%Y-%m-%d"), "Production (MWh)": value} for dt, value in records]
+            )
+            st.dataframe(mdf, hide_index=True, use_container_width=True)
+        else:
+            st.info("No stored production data for this month yet.")
+
+        pdf = build_monthly_pdf(year, month)
+        st.download_button(
+            "⬇️ Download Monthly PDF",
+            data=pdf,
+            file_name=f"monthly-production-{year}-{month:02d}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 
 def render_history_view():
