@@ -432,8 +432,7 @@ def build_monthly_pdf(year, month):
     summary = [
         ["Indicator", "Value"],
         ["Month", f"{month_name} {year}"],
-        ["Monthly real production", f"{total_prod:.1f} MWh"],
-        ["Days with stored production data", str(len(records))],
+        ["Monthly real production", f"{total_prod:.1f} MWh"], 
     ]
     details = [[dt.strftime("%Y-%m-%d"), f"{value:.1f}"] for dt, value in records]
 
@@ -738,9 +737,7 @@ def render_report_view():
 
         total = monthly_production(year, month)
         records = month_records(year, month)
-        c1, c2 = st.columns(2)
-        c1.metric("Monthly production total", f"{total:.1f} MWh")
-        c2.metric("Days with stored production data", len(records))
+        st.metric("Monthly production total", f"{total:.1f} MWh")
 
         if records:
             mdf = pd.DataFrame(
